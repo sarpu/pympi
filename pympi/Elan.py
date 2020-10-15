@@ -1395,19 +1395,37 @@ def eaf_from_chat(file_path, codec='ascii', extension='wav'):
     :throws StopIteration: If the file doesn't contain a @End header, thus
         inferring the file is broken.
     """
+    def _get_line():
+        # if buffer is not empty, we already read something!
+        nonlocal buf
+        if buf:
+            result = buf
+            buf = ''
+        else:
+            result = next(chatin).rstrip().decode(codec)
+        while (nl := next(chatin).rstrip().decode(codec)).startswith('\t'):
+            result += ' ' + nl.strip()
+
+        buf = nl
+        return result
+    
+    buf = ''
+    pattern = re.compile(r'.*?\x15.*?\x15')
+
     eafob = Eaf()
     eafob.add_linguistic_type('parent')
     eafob.add_linguistic_type(
         'child', constraints='Symbolic_Association', timealignable=False)
     participantsdb = {}
     last_annotation = None
-    with open(file_path, 'r') as chatin:
+    with open(file_path, 'rb') as chatin:
         while True:
-            line = chatin.readline().strip().decode(codec)
+            line = _get_line()
+            print(line)
             if line == '@UTF8':  # Codec marker
                 codec = 'utf8'
                 continue
-            elif line == '@End':  # End of file marker
+            elif line == '@End' or buf  == '@End':  # End of file marker
                 break
             elif line.startswith('@') and line != '@Begin':  # Header marker
                 key, value = line.split(':\t')
@@ -1418,13 +1436,13 @@ def eaf_from_chat(file_path, codec='ascii', extension='wav'):
                 elif key == '@Participants':
                     for participant in value.split(','):
                         splits = participant.strip().split(' ')
-                        splits = map(lambda x: x.replace('_', ' '), splits)
+                        splits = list(map(lambda x: x.replace('_', ' '), splits))
                         if len(splits) == 2:
                             participantsdb[splits[0]] = (None, splits[1])
                         elif len(splits) == 3:
                             participantsdb[splits[0]] = (splits[1], splits[2])
                 elif key == '@ID':
-                    ids = map(lambda x: x.replace('_', ''), value.split('|'))
+                    ids = list(map(lambda x: x.replace('_', ''), value.split('|')))
                     eafob.add_tier(ids[2], part=participantsdb[ids[2]][0],
                                    language=ids[0])
                 elif key == '@Media':
@@ -1435,15 +1453,19 @@ def eaf_from_chat(file_path, codec='ascii', extension='wav'):
                     for tier in eafob.get_tier_names():
                         eafob.tiers[tier][2]['ANNOTATOR'] = value
             elif line.startswith('*'):  # Main tier marker
-                while len(line.split('\x15')) != 3:
-                    line += chatin.readline().decode(codec).strip()
+                #while len(line.split('\x15')) != 3:
+                #    line += chatin.readline().decode(codec).strip()
                 for participant in participantsdb.keys():
                     if line.startswith('*{}:'.format(participant)):
                         splits = ''.join(line.split(':')[1:]).strip()
-                        utt, time, _ = splits.split('\x15')
-                        time = map(int, time.split('_'))
-                        last_annotation = (participant, time[0], time[1], utt)
-                        eafob.add_annotation(*last_annotation)
+
+                        items = pattern.findall(splits)
+
+                        for splits in items:
+                            utt, time, _ = splits.split('\x15')
+                            time = list(map(int, time.split('_')))
+                            last_annotation = (participant, time[0], time[1], utt)
+                            eafob.add_annotation(*last_annotation)
             elif line.startswith('%'):  # Dependant tier marker
                 splits = line.split(':')
                 name = '{}_{}'.format(last_annotation[0], splits[0][1:])
